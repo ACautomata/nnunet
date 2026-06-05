@@ -11,7 +11,7 @@ Required path arguments:
   --runtime-dir PATH   Directory where all nnUNet outputs will be written.
 
 Options:
-  --modalities LIST        Space-separated modalities to train (default: "t1c t1n t2f t2w").
+  --modalities "LIST"       Quoted space-separated modalities (default: "t1c t1n t2f t2w").
   --train-config NAME      nnUNet config to train (default: 3d_fullres).
   --fold N                Fold to train (default: 0).
   --gpu-id N              GPU id passed to nnUNet (default: 0).
