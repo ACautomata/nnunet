@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Conda
+.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Hydra outputs
+outputs/
+multirun/
+*.log
+
+# Data (adjust as needed)
+data/
+*.nii.gz
+*.nii
+*.mha
+*.mhd
+*.raw
+*.npz
+*.pkl
+*.h5
+*.hdf5
+
+# Models
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
