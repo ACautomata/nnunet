@@ -158,15 +158,21 @@ def run_validate(cfg: DictConfig) -> None:
     configs = cfg.get("configs", ("3d_fullres",))
     train_config = cfg.get("train_config", None)
     if train_config is not None:
+        # Match run_train: with train_config, train only the single fold
+        # the user requested. Validating the full 5 folds when only one
+        # was trained would be meaningless (no checkpoint exists for the
+        # others) and slow.
         configs = (train_config,)
-    num_folds = cfg.get("num_folds", 5)
+        folds = range(cfg.get("fold", 0), cfg.get("fold", 0) + 1)
+    else:
+        folds = range(cfg.get("num_folds", 5))
 
     logger.info("Validating configs=%s", configs)
     # Bypass runner.validate() which passes --only_run_validation (unrecognized
     # by nnunetv2>=2.7). Use train_single_model with val=True instead, which
     # correctly generates the --val flag.
     for config in configs:
-        for fold in range(num_folds):
+        for fold in folds:
             runner.train_single_model(config=config, fold=fold, val=True)
 
 

@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+from nnunet.data import MODALITY_NAMES
+
 
 def main() -> None:
     cfg = get_config()
@@ -130,76 +132,36 @@ def create_data_subset(cfg: dict) -> None:
     print(f"  Linked {len(selected)} subjects to {dst_root}")
 
 
-def _find_file(directory: Path, suffix: str) -> Path | None:
-    """Find a file in directory matching a suffix (e.g. '-t2f.nii.gz')."""
-    for f in directory.iterdir():
-        if f.name.endswith(suffix):
-            return f
-    return None
-
-
 def create_nnunet_raw_dataset(cfg: dict) -> None:
     """Manually create nnUNet raw dataset format (Dataset<ID>_<Name>/).
 
     Bypasses MONAI's ``convert_dataset`` which mangles the dataset ID.
     Creates symlinks into imagesTr/labelsTr and writes dataset.json.
+    Delegates to ``nnunet.data.create_nnunet_raw_dataset`` so the
+    smoke test shares the production implementation (handles both
+    direct and prefixed BraTS filenames, clears stale case links).
     """
     print("[2/7] Creating nnUNet raw dataset...")
-    did = cfg["dataset_id"]
-    dataset_dir = cfg["nnunet_raw"] / f"Dataset{did:04d}_BraTS2023"
-    images_tr = dataset_dir / "imagesTr"
-    labels_tr = dataset_dir / "labelsTr"
-    images_tr.mkdir(parents=True, exist_ok=True)
-    labels_tr.mkdir(parents=True, exist_ok=True)
+    from nnunet.data import _find_modality_file, _find_seg_file
+    from nnunet.data import create_nnunet_raw_dataset as _build
 
-    modality = cfg["modality"]  # e.g. "t2f"
-    mod_suffix = f"-{modality}.nii.gz"
-    seg_suffix = "-seg.nii.gz"
     smoke_data = cfg["smoke_data"]
-
-    count = 0
+    modality = cfg["modality"]
+    n_subjects = 0
     for subj_name in cfg["subjects"]:
         subj_dir = smoke_data / subj_name
-        img_file = _find_file(subj_dir, mod_suffix)
-        lbl_file = _find_file(subj_dir, seg_suffix)
+        mod_file = MODALITY_NAMES[modality]
+        if _find_modality_file(subj_dir, mod_file) and _find_seg_file(subj_dir):
+            n_subjects += 1
+    print(f"  Found {n_subjects} usable subjects in {smoke_data}")
 
-        if img_file is None or lbl_file is None:
-            print(f"  WARNING: skipping {subj_name} (missing files)")
-            continue
-
-        # nnUNet naming: <case_id>_0000.nii.gz for images, <case_id>.nii.gz for labels
-        case_id = f"case_{count:03d}"
-        img_link = images_tr / f"{case_id}_0000.nii.gz"
-        lbl_link = labels_tr / f"{case_id}.nii.gz"
-
-        # Remove existing links before creating new ones
-        if img_link.exists() or img_link.is_symlink():
-            img_link.unlink()
-        if lbl_link.exists() or lbl_link.is_symlink():
-            lbl_link.unlink()
-
-        # Resolve through symlinks to get the real file path
-        img_link.symlink_to(img_file.resolve())
-        lbl_link.symlink_to(lbl_file.resolve())
-        count += 1
-
-    # dataset.json — BraTS2023 has 3 foreground labels: NCR, ED, ET
-    dataset_json = {
-        "channel_names": {"0": "MRI"},
-        "labels": {
-            "background": 0,
-            "NCR_NET": 1,
-            "ED": 2,
-            "ET": 3,
-        },
-        "numTraining": count,
-        "file_ending": ".nii.gz",
-        "description": "BraTS2023 Smoke Test",
-    }
-    (dataset_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
-
-    cfg["dataset_name"] = dataset_dir.name
-    print(f"  Created {dataset_dir.name} with {count} cases")
+    dataset_dir = _build(
+        data_root=str(cfg["smoke_data"]),
+        nnunet_raw=str(cfg["nnunet_raw"]),
+        modality=modality,
+        dataset_id=cfg["dataset_id"],
+    )
+    print(f"  Created {Path(dataset_dir).name}")
 
 
 def install_custom_trainer(cfg: dict) -> None:

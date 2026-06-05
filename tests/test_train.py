@@ -61,10 +61,39 @@ def test_run_validate_passes_val_flag(MockRunner):
     mock = MagicMock()
     MockRunner.return_value = mock
 
-    cfg = _make_cfg(train_config="2d", num_folds=3)
+    # No train_config -> full configs list, multiple folds.
+    cfg = _make_cfg(train_config=None, num_folds=3)
     run_validate(cfg)
 
     # 1 config * 3 folds = 3 calls
     assert mock.train_single_model.call_count == 3
     for call in mock.train_single_model.call_args_list:
         assert call.kwargs["val"] is True
+
+
+@patch("monai.apps.nnunet.nnUNetV2Runner")
+def test_run_validate_honors_single_fold_when_train_config_set(MockRunner):
+    """P2 fix (round 3): with train_config set, run_train only trains one fold.
+    run_validate must validate that same single fold, not the full 5."""
+    mock = MagicMock()
+    MockRunner.return_value = mock
+
+    cfg = _make_cfg(train_config="2d", fold=2, num_folds=5)
+    run_validate(cfg)
+
+    folds_validated = [c.kwargs["fold"] for c in mock.train_single_model.call_args_list]
+    assert folds_validated == [2]
+
+
+@patch("monai.apps.nnunet.nnUNetV2Runner")
+def test_run_validate_default_fold_when_train_config_set(MockRunner):
+    """When train_config is set but fold is unset, validate fold 0."""
+    mock = MagicMock()
+    MockRunner.return_value = mock
+
+    cfg = _make_cfg(train_config="2d", num_folds=5)
+    # cfg.fold is not in _make_cfg defaults -> cfg.get("fold") returns None
+    run_validate(cfg)
+
+    folds_validated = [c.kwargs["fold"] for c in mock.train_single_model.call_args_list]
+    assert folds_validated == [0]
