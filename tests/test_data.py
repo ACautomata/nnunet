@@ -5,7 +5,13 @@ import tempfile
 
 import pytest
 
-from nnunet.data import _find_modality_file, _find_seg_file, prepare_datalist, prepare_inference_folder
+from nnunet.data import (
+    _find_modality_file,
+    _find_seg_file,
+    create_nnunet_raw_dataset,
+    prepare_datalist,
+    prepare_inference_folder,
+)
 
 
 def _make_brats_subjects(root, n_train=4, n_test=2):
@@ -188,3 +194,85 @@ class TestPrepareInferenceFolder:
         result = prepare_inference_folder(data_root=str(empty_root), output_folder=out, modality="t2f")
         assert result == out
         assert len(os.listdir(out)) == 0
+
+    def test_clears_stale_subjects_from_previous_run(self, tmp_path):
+        """P2 fix: re-running on a smaller input set removes links for dropped subjects."""
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        out = str(tmp_path / "flat")
+        # First pass with both subjects.
+        prepare_inference_folder(data_root=str(tmp_path), output_folder=out, modality="t2f")
+        first = sorted(os.listdir(out))
+        assert len(first) == 2
+
+        # Drop one subject entirely (with its files) so the second pass won't see it.
+        import shutil
+        shutil.rmtree(str(tmp_path / "BraTS-GLI-00001-000"))
+        prepare_inference_folder(data_root=str(tmp_path), output_folder=out, modality="t2f")
+        second = sorted(os.listdir(out))
+        assert len(second) == 1
+        assert second[0].startswith("BraTS-GLI-00000-000")
+
+
+class TestCreateNnunetRawDataset:
+    """P1 fix: build nnUNet raw dataset directly, bypassing MONAI's broken ID mapping."""
+
+    def test_creates_dataset_directory(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result = create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        assert os.path.isdir(result)
+        assert os.path.basename(result) == "Dataset1001_BraTS2023"
+
+    def test_creates_image_and_label_symlinks(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result = create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        images = sorted(os.listdir(os.path.join(result, "imagesTr")))
+        labels = sorted(os.listdir(os.path.join(result, "labelsTr")))
+        assert images == [
+            "case_000_0000.nii.gz",
+            "case_001_0000.nii.gz",
+            "case_002_0000.nii.gz",
+        ]
+        assert labels == ["case_000.nii.gz", "case_001.nii.gz", "case_002.nii.gz"]
+
+    def test_writes_dataset_json(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result = create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        with open(os.path.join(result, "dataset.json")) as f:
+            ds = json.load(f)
+        assert ds["channel_names"] == {"0": "T2F"}
+        assert ds["labels"] == {"background": 0, "NCR_NET": 1, "ED": 2, "ET": 3}
+        assert ds["numTraining"] == 2
+        assert ds["file_ending"] == ".nii.gz"
+
+    def test_no_subjects_raises(self, tmp_path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        raw = str(tmp_path / "nnunet_raw")
+        with pytest.raises(ValueError, match="No BraTS2023 subjects"):
+            create_nnunet_raw_dataset(
+                data_root=str(empty), nnunet_raw=raw, modality="t2f",
+            )
+
+    def test_four_digit_id_is_preserved(self, tmp_path):
+        """The whole point of the fix: a 4-digit ID stays in the folder name."""
+        _make_brats_subjects(tmp_path, n_train=1, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result = create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        # nnUNet looks up by ID 1001 -> Dataset1001_*
+        # If we had used MONAI's convert_dataset, this would be Dataset001_*
+        assert os.path.basename(result) == "Dataset1001_BraTS2023"

@@ -33,7 +33,7 @@ import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from nnunet.data import prepare_datalist
+from nnunet.data import create_nnunet_raw_dataset, prepare_datalist
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,19 @@ def _ensure_dirs(cfg: DictConfig) -> None:
 
 
 def _build_input_config(cfg: DictConfig) -> dict:
-    """Build the dict consumed by ``nnUNetV2Runner``."""
+    """Build the dict consumed by ``nnUNetV2Runner``.
+
+    ``datalist`` is only consumed by ``convert_dataset`` (which the
+    pipeline no longer uses) and by ``MONAI``'s ``analyze_data`` during
+    conversion.  Use an empty string as a safe placeholder for
+    prepare-free modes (plan / train / validate).
+    """
+    datalist_val = cfg.get("datalist", "")
+    if datalist_val is None or str(datalist_val) == "???":
+        datalist_val = ""
     return {
-        "datalist": cfg.datalist,
-        "dataroot": cfg.dataroot,
+        "datalist": str(datalist_val),
+        "dataroot": str(cfg.get("dataroot", "")),
         "modality": cfg.get("modality", "MRI"),
         "nnunet_raw": cfg.nnunet_raw,
         "nnunet_preprocessed": cfg.nnunet_preprocessed,
@@ -62,9 +71,15 @@ def _build_input_config(cfg: DictConfig) -> dict:
 
 
 def run_prepare(cfg: DictConfig) -> None:
-    """Step 1: generate datalist and convert to nnUNet format."""
-    from monai.apps.nnunet import nnUNetV2Runner
+    """Step 1: generate datalist and build the nnUNet raw dataset.
 
+    Bypasses ``nnUNetV2Runner.convert_dataset()`` because MONAI 1.5.2's
+    ID-naming formula (``str(int(dataset_id) + 1000)[-3:]``) mis-maps
+    four-digit IDs such as ``1001`` to ``Dataset001_``, while the
+    rest of the runner keeps looking up ID ``1001``.  We build the
+    raw dataset directory directly and let planning / training work
+    against the correct folder.
+    """
     data_root = str(cfg.dataroot)
     modality = cfg.get("modality_file", "t2f")
     output_json = os.path.join(str(cfg.nnunet_raw), "brats2023_datalist.json")
@@ -76,16 +91,14 @@ def run_prepare(cfg: DictConfig) -> None:
         output_json=output_json,
     )
 
-    input_config = _build_input_config(cfg)
-    input_config["datalist"] = output_json
-
-    runner = nnUNetV2Runner(
-        input_config=input_config,
-        trainer_class_name=cfg.get("trainer_class_name", "nnUNetTrainer"),
-        export_validation_probabilities=cfg.get("export_validation_probabilities", True),
+    dataset_id = int(cfg.get("dataset_name_or_id", 1001))
+    dataset_dir = create_nnunet_raw_dataset(
+        data_root=data_root,
+        nnunet_raw=str(cfg.nnunet_raw),
+        modality=modality,
+        dataset_id=dataset_id,
     )
-    logger.info("Converting dataset to nnUNet format...")
-    runner.convert_dataset()
+    logger.info("Raw dataset created at %s", dataset_dir)
 
 
 def run_plan(cfg: DictConfig) -> None:
@@ -170,11 +183,11 @@ def main(cfg: DictConfig) -> None:
 
     mode = cfg.get("mode", "all")
 
-    # Validate that paths are overridden (not left as ???)
-    always_required = ("dataroot", "nnunet_raw", "nnunet_preprocessed", "nnunet_results")
-    if mode in ("all", "prepare"):
-        always_required = ("datalist",) + always_required
-    for key in always_required:
+    # Validate that paths are overridden (not left as ???).
+    # ``datalist`` is only needed by mode=prepare; the new prepare step
+    # generates the nnUNet raw dataset directly so it is optional.
+    required = ("dataroot", "nnunet_raw", "nnunet_preprocessed", "nnunet_results")
+    for key in required:
         val = cfg.get(key)
         if val is None or str(val) == "???":
             logger.error(
@@ -185,7 +198,6 @@ def main(cfg: DictConfig) -> None:
 
     _ensure_dirs(cfg)
 
-    mode = cfg.get("mode", "all")
     if mode == "all":
         # Full pipeline
         run_prepare(cfg)

@@ -25,7 +25,15 @@ import os
 import random
 from pathlib import Path
 
-__all__ = ["prepare_datalist", "prepare_inference_folder"]
+__all__ = ["prepare_datalist", "prepare_inference_folder", "create_nnunet_raw_dataset"]
+
+# BraTS2023 ground-truth labels (foreground only; background is implicit 0).
+_BRATS_LABELS = {
+    "background": 0,
+    "NCR_NET": 1,
+    "ED": 2,
+    "ET": 3,
+}
 
 # Modality filename stems shipped with BraTS2023.
 MODALITY_NAMES: dict[str, str] = {
@@ -180,6 +188,10 @@ def prepare_inference_folder(
     symlinks from each subject's chosen modality file into *output_folder*
     using that convention.
 
+    The destination folder is cleared before relinking so stale entries
+    from a previous run do not produce predictions on subjects that are
+    no longer present.
+
     Parameters
     ----------
     data_root : str
@@ -202,6 +214,10 @@ def prepare_inference_folder(
     out = Path(output_folder)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Clear stale nnUNet-format links so removed subjects don't leak through.
+    for stale in out.glob("*_0000.nii.gz"):
+        stale.unlink()
+
     for entry in sorted(data_root.iterdir()):
         if not entry.is_dir():
             continue
@@ -215,3 +231,96 @@ def prepare_inference_folder(
         os.symlink(src, dst)
 
     return str(out)
+
+
+def create_nnunet_raw_dataset(
+    data_root: str,
+    nnunet_raw: str,
+    modality: str = "t2f",
+    dataset_id: int = 1001,
+    dataset_name: str = "BraTS2023",
+) -> str:
+    """Build an nnUNet raw dataset from BraTS2023 subject folders.
+
+    Creates ``Dataset{ID:04d}_{name}/`` with ``imagesTr/`` symlinks
+    named ``<case>_<ch:04d>.nii.gz`` and ``labelsTr/`` symlinks named
+    ``<case>.nii.gz``, plus a ``dataset.json`` describing channels and
+    foreground labels.  The case IDs are stable sequential
+    ``case_NNN`` identifiers independent of the original subject names.
+
+    This bypasses MONAI's ``nnUNetV2Runner.convert_dataset()`` which
+    mis-maps four-digit dataset IDs (adds 1000 and keeps the last three
+    digits, turning ``1001`` into ``Dataset001_`` while the rest of the
+    runner still looks up ID ``1001``).
+
+    Parameters
+    ----------
+    data_root : str
+        Root directory containing BraTS2023 subject folders.
+    nnunet_raw : str
+        nnUNet raw data base directory (env ``nnUNet_raw``).
+    modality : str
+        One of ``"t1c"``, ``"t1n"``, ``"t2f"``, ``"t2w"``.  Only a
+        single channel is supported in this entry point.
+    dataset_id : int
+        Numeric dataset ID (becomes ``Dataset{ID:04d}_<name>``).
+    dataset_name : str
+        Suffix for the dataset folder name.
+
+    Returns
+    -------
+    str
+        Path to the created dataset directory.
+    """
+    if modality not in MODALITY_NAMES:
+        raise ValueError(f"Unknown modality {modality!r}. Choose from {list(MODALITY_NAMES)}")
+
+    modality_file = MODALITY_NAMES[modality]
+    data_root = Path(data_root)
+    if not data_root.is_dir():
+        raise FileNotFoundError(f"Data root not found: {data_root}")
+
+    dataset_dir = Path(nnunet_raw) / f"Dataset{dataset_id:04d}_{dataset_name}"
+    images_tr = dataset_dir / "imagesTr"
+    labels_tr = dataset_dir / "labelsTr"
+    images_tr.mkdir(parents=True, exist_ok=True)
+    labels_tr.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    for subj_dir in sorted(data_root.iterdir()):
+        if not subj_dir.is_dir():
+            continue
+        img_rel = _find_modality_file(subj_dir, modality_file)
+        lbl_rel = _find_seg_file(subj_dir)
+        if img_rel is None or lbl_rel is None:
+            continue
+
+        img_src = (subj_dir / Path(img_rel).name).resolve()
+        lbl_src = (subj_dir / Path(lbl_rel).name).resolve()
+
+        case_id = f"case_{count:03d}"
+        img_link = images_tr / f"{case_id}_0000.nii.gz"
+        lbl_link = labels_tr / f"{case_id}.nii.gz"
+        if img_link.exists() or img_link.is_symlink():
+            img_link.unlink()
+        if lbl_link.exists() or lbl_link.is_symlink():
+            lbl_link.unlink()
+        img_link.symlink_to(img_src)
+        lbl_link.symlink_to(lbl_src)
+        count += 1
+
+    if count == 0:
+        raise ValueError(
+            f"No BraTS2023 subjects with modality {modality!r} found in {data_root}"
+        )
+
+    dataset_json = {
+        "channel_names": {"0": modality.upper()},
+        "labels": _BRATS_LABELS,
+        "numTraining": count,
+        "file_ending": ".nii.gz",
+        "description": f"BraTS2023 single-modality ({modality})",
+    }
+    (dataset_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
+
+    return str(dataset_dir)
