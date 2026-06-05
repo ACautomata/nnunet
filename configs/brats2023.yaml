@@ -1,0 +1,44 @@
+# BraTS2023 single-modality nnUNet segmentation configuration.
+# All paths MUST be provided via CLI override. These values are placeholders only.
+
+# --- Data ---
+datalist: ???
+dataroot: ???
+modality: "MRI"  # channel label for nnUNet metadata
+modality_file: "t2f"  # BraTS filename stem: t1c, t1n, t2f, t2w
+
+# --- nnUNet working directories ---
+nnunet_raw: ???
+nnunet_preprocessed: ???
+nnunet_results: ???
+
+# --- Dataset ---
+dataset_name_or_id: 1001
+
+# --- Pipeline control ---
+mode: all  # all | prepare | plan | train | validate
+
+# --- Training ---
+trainer_class_name: "nnUNetTrainer"
+export_validation_probabilities: true
+num_folds: 5
+train_config: null  # e.g. "3d_fullres" to train single config; null = default suite
+configs:
+  - "3d_fullres"
+gpu_id: 0
+
+# --- Prediction (used by predict CLI) ---
+input_folder: ???
+output_folder: ???
+model_folder: ???
+use_folds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+checkpoint_name: "checkpoint_final.pth"
+tile_step_size: 0.5
+use_gaussian: true
+use_mirroring: true
+save_probabilities: false
