@@ -276,3 +276,24 @@ class TestCreateNnunetRawDataset:
         # nnUNet looks up by ID 1001 -> Dataset1001_*
         # If we had used MONAI's convert_dataset, this would be Dataset001_*
         assert os.path.basename(result) == "Dataset1001_BraTS2023"
+
+    def test_clears_stale_cases_from_previous_run(self, tmp_path):
+        """P2 fix (round 2): re-running with fewer subjects drops the old case links."""
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        first_images = sorted(os.listdir(os.path.join(raw, "Dataset1001_BraTS2023", "imagesTr")))
+        assert len(first_images) == 3
+
+        # Drop one subject and re-run.
+        import shutil
+        shutil.rmtree(str(tmp_path / "BraTS-GLI-00002-000"))
+        create_nnunet_raw_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modality="t2f", dataset_id=1001,
+        )
+        second_images = sorted(os.listdir(os.path.join(raw, "Dataset1001_BraTS2023", "imagesTr")))
+        assert second_images == ["case_000_0000.nii.gz", "case_001_0000.nii.gz"]

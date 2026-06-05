@@ -156,6 +156,9 @@ def run_validate(cfg: DictConfig) -> None:
     )
 
     configs = cfg.get("configs", ("3d_fullres",))
+    train_config = cfg.get("train_config", None)
+    if train_config is not None:
+        configs = (train_config,)
     num_folds = cfg.get("num_folds", 5)
 
     logger.info("Validating configs=%s", configs)

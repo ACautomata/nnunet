@@ -286,6 +286,13 @@ def create_nnunet_raw_dataset(
     images_tr.mkdir(parents=True, exist_ok=True)
     labels_tr.mkdir(parents=True, exist_ok=True)
 
+    # Clear any case_NNN symlinks from a previous (larger) run so they
+    # don't linger alongside the new ones.  nnUNet scans imagesTr
+    # wholesale and would otherwise validate or train on stale cases.
+    for stale_dir in (images_tr, labels_tr):
+        for stale in stale_dir.glob("case_*"):
+            stale.unlink()
+
     count = 0
     for subj_dir in sorted(data_root.iterdir()):
         if not subj_dir.is_dir():
