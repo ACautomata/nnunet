@@ -10,6 +10,9 @@ requires-python = ">=3.11"
 dependencies = [
     "torch",
     "monai",
+    "nnunetv2",
+    "nibabel",
+    "batchgenerators",
     "hydra-core",
     "stable-pretraining",
 ]
