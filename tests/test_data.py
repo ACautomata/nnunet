@@ -9,6 +9,7 @@ from nnunet.data import (
     _find_modality_file,
     _find_seg_file,
     create_nnunet_raw_dataset,
+    create_random_modality_dataset,
     prepare_datalist,
     prepare_inference_folder,
 )
@@ -297,3 +298,121 @@ class TestCreateNnunetRawDataset:
         )
         second_images = sorted(os.listdir(os.path.join(raw, "Dataset1001_BraTS2023", "imagesTr")))
         assert second_images == ["case_000_0000.nii.gz", "case_001_0000.nii.gz"]
+
+
+class TestCreateRandomModalityDataset:
+    """Tests for the random-modality dataset builder."""
+
+    def test_creates_dataset_with_all_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result = create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        assert os.path.isdir(result)
+        assert os.path.basename(result) == "Dataset2001_BraTS2023_RandomModality"
+
+    def test_case_count_equals_subjects_times_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr"))
+        labels = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "labelsTr"))
+        # 3 subjects × 4 modalities = 12 cases
+        assert len(images) == 12
+        assert len(labels) == 12
+
+    def test_subset_of_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modalities=["t1c", "t2f"], dataset_id=2001,
+        )
+        images = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr"))
+        # 2 subjects × 2 modalities = 4 cases
+        assert len(images) == 4
+
+    def test_dataset_json_channel_is_generic_mri(self, tmp_path):
+        """Channel name should be generic 'MRI', not a specific modality."""
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        with open(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "dataset.json")) as f:
+            ds = json.load(f)
+        assert ds["channel_names"] == {"0": "MRI"}
+        assert ds["labels"] == {"background": 0, "NCR_NET": 1, "ED": 2, "ET": 3}
+        assert ds["numTraining"] == 8  # 2 subjects × 4 modalities
+
+    def test_case_naming_is_sequential(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        # Should use 4-digit case IDs: case_0000 through case_0007
+        expected = [f"case_{i:04d}_0000.nii.gz" for i in range(8)]
+        assert images == expected
+
+    def test_labels_symlink_to_valid_targets(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        labels_dir = os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "labelsTr")
+        for lbl in os.listdir(labels_dir):
+            target = os.path.realpath(os.path.join(labels_dir, lbl))
+            assert os.path.isfile(target), f"Label symlink {lbl} -> {target} is broken"
+
+    def test_images_symlink_to_valid_targets(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images_dir = os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")
+        for img in os.listdir(images_dir):
+            target = os.path.realpath(os.path.join(images_dir, img))
+            assert os.path.isfile(target), f"Image symlink {img} -> {target} is broken"
+
+    def test_no_labeled_subjects_raises(self, tmp_path):
+        """Subjects without seg.nii.gz should be skipped, and all-skipped raises."""
+        _make_brats_subjects(tmp_path, n_train=0, n_test=2)
+        raw = str(tmp_path / "nnunet_raw")
+        with pytest.raises(ValueError, match="No BraTS2023 subjects"):
+            create_random_modality_dataset(
+                data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+            )
+
+    def test_invalid_modality_raises(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=1, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        with pytest.raises(ValueError, match="Unknown modality"):
+            create_random_modality_dataset(
+                data_root=str(tmp_path), nnunet_raw=raw,
+                modalities=["invalid"], dataset_id=2001,
+            )
+
+    def test_clears_stale_cases_from_previous_run(self, tmp_path):
+        """Re-running with fewer subjects drops old case symlinks."""
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        first = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        assert len(first) == 12
+
+        import shutil
+        shutil.rmtree(str(tmp_path / "BraTS-GLI-00002-000"))
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        second = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        assert len(second) == 8  # 2 subjects × 4 modalities

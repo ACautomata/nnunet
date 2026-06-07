@@ -25,7 +25,12 @@ import os
 import random
 from pathlib import Path
 
-__all__ = ["prepare_datalist", "prepare_inference_folder", "create_nnunet_raw_dataset"]
+__all__ = [
+    "prepare_datalist",
+    "prepare_inference_folder",
+    "create_nnunet_raw_dataset",
+    "create_random_modality_dataset",
+]
 
 # BraTS2023 ground-truth labels (foreground only; background is implicit 0).
 _BRATS_LABELS = {
@@ -327,6 +332,111 @@ def create_nnunet_raw_dataset(
         "numTraining": count,
         "file_ending": ".nii.gz",
         "description": f"BraTS2023 single-modality ({modality})",
+    }
+    (dataset_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
+
+    return str(dataset_dir)
+
+
+def create_random_modality_dataset(
+    data_root: str,
+    nnunet_raw: str,
+    modalities: list[str] | None = None,
+    dataset_id: int = 2001,
+    dataset_name: str = "BraTS2023_RandomModality",
+) -> str:
+    """Build an nnUNet raw dataset with random modality sampling.
+
+    For each subject, creates one case per modality (each single-channel).
+    nnUNet's data shuffling naturally produces random modality sampling
+    during training.  The model learns a single set of parameters that
+    works across all modalities.
+
+    For example, with 1000 subjects and 4 modalities (t1c, t1n, t2f, t2w),
+    the dataset contains 4000 single-channel training cases.  Each case
+    shares the same label as its parent subject.
+
+    Parameters
+    ----------
+    data_root : str
+        Root directory containing BraTS2023 subject folders.
+    nnunet_raw : str
+        nnUNet raw data base directory (env ``nnUNet_raw``).
+    modalities : list[str] | None
+        Modalities to include.  Defaults to all four BraTS modalities.
+    dataset_id : int
+        Numeric dataset ID (becomes ``Dataset{ID:04d}_<name>``).
+    dataset_name : str
+        Suffix for the dataset folder name.
+
+    Returns
+    -------
+    str
+        Path to the created dataset directory.
+    """
+    if modalities is None:
+        modalities = list(MODALITY_NAMES.keys())
+    for mod in modalities:
+        if mod not in MODALITY_NAMES:
+            raise ValueError(f"Unknown modality {mod!r}. Choose from {list(MODALITY_NAMES)}")
+
+    data_root = Path(data_root)
+    if not data_root.is_dir():
+        raise FileNotFoundError(f"Data root not found: {data_root}")
+
+    dataset_dir = Path(nnunet_raw) / f"Dataset{dataset_id:04d}_{dataset_name}"
+    images_tr = dataset_dir / "imagesTr"
+    labels_tr = dataset_dir / "labelsTr"
+    images_tr.mkdir(parents=True, exist_ok=True)
+    labels_tr.mkdir(parents=True, exist_ok=True)
+
+    # Clear stale case symlinks from a previous run.
+    for stale_dir in (images_tr, labels_tr):
+        for stale in stale_dir.glob("case_*"):
+            stale.unlink()
+
+    count = 0
+    for subj_dir in sorted(data_root.iterdir()):
+        if not subj_dir.is_dir():
+            continue
+        lbl_rel = _find_seg_file(subj_dir)
+        if lbl_rel is None:
+            continue
+
+        lbl_src = (subj_dir / Path(lbl_rel).name).resolve()
+
+        for mod in modalities:
+            modality_file = MODALITY_NAMES[mod]
+            img_rel = _find_modality_file(subj_dir, modality_file)
+            if img_rel is None:
+                continue
+
+            img_src = (subj_dir / Path(img_rel).name).resolve()
+
+            case_id = f"case_{count:04d}"
+            img_link = images_tr / f"{case_id}_0000.nii.gz"
+            lbl_link = labels_tr / f"{case_id}.nii.gz"
+
+            if img_link.exists() or img_link.is_symlink():
+                img_link.unlink()
+            if lbl_link.exists() or lbl_link.is_symlink():
+                lbl_link.unlink()
+
+            img_link.symlink_to(img_src)
+            lbl_link.symlink_to(lbl_src)
+            count += 1
+
+    if count == 0:
+        raise ValueError(
+            f"No BraTS2023 subjects with labels found in {data_root}"
+        )
+
+    dataset_json = {
+        "channel_names": {"0": "MRI"},
+        "labels": _BRATS_LABELS,
+        "numTraining": count,
+        "file_ending": ".nii.gz",
+        "description": f"BraTS2023 random-modality ({', '.join(modalities)})",
     }
     (dataset_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
 

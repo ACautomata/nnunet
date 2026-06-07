@@ -33,7 +33,7 @@ import sys
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from nnunet.data import create_nnunet_raw_dataset, prepare_datalist
+from nnunet.data import create_nnunet_raw_dataset, create_random_modality_dataset, prepare_datalist
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,39 @@ def run_prepare(cfg: DictConfig) -> None:
         dataset_id=dataset_id,
     )
     logger.info("Raw dataset created at %s", dataset_dir)
+
+
+def run_prepare_random_modality(cfg: DictConfig) -> None:
+    """Step 1 for random-modality pipeline: build augmented nnUNet raw dataset.
+
+    Creates one case per subject×modality combination.  nnUNet's shuffling
+    produces random modality sampling during training.  Uses dataset ID 2001
+    by default to avoid collision with single-modality datasets.
+    """
+    data_root = str(cfg.dataroot)
+
+    # Accept modalities as a list or a space-separated string.
+    modalities_cfg = cfg.get("modalities", "t1c t1n t2f t2w")
+    if isinstance(modalities_cfg, str):
+        modalities = modalities_cfg.split()
+    elif hasattr(modalities_cfg, "__iter__"):
+        modalities = list(modalities_cfg)
+    else:
+        modalities = ["t1c", "t1n", "t2f", "t2w"]
+
+    dataset_id = int(cfg.get("dataset_name_or_id", 2001))
+
+    logger.info(
+        "Preparing random-modality dataset: modalities=%s dataset_id=%s",
+        modalities, dataset_id,
+    )
+    dataset_dir = create_random_modality_dataset(
+        data_root=data_root,
+        nnunet_raw=str(cfg.nnunet_raw),
+        modalities=modalities,
+        dataset_id=dataset_id,
+    )
+    logger.info("Random-modality raw dataset created at %s", dataset_dir)
 
 
 def run_plan(cfg: DictConfig) -> None:
@@ -183,7 +216,11 @@ _MODES = {
     "plan": run_plan,
     "train": run_train,
     "validate": run_validate,
+    "prepare_random_modality": run_prepare_random_modality,
 }
+
+# Modes that skip the datalist step (random-modality pipeline doesn't use it).
+_RANDOM_MODALITY_MODES = {"random_modality", "random_modality_train"}
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="brats2023")
@@ -212,10 +249,21 @@ def main(cfg: DictConfig) -> None:
         run_prepare(cfg)
         run_plan(cfg)
         run_train(cfg)
+    elif mode == "random_modality":
+        # Random-modality full pipeline: prepare → plan → train
+        run_prepare_random_modality(cfg)
+        run_plan(cfg)
+        run_train(cfg)
+    elif mode == "random_modality_train":
+        # Skip data prep and planning, only train
+        run_train(cfg)
     elif mode in _MODES:
         _MODES[mode](cfg)
     else:
-        logger.error("Unknown mode %r. Choose from: all, %s", mode, ", ".join(_MODES))
+        logger.error(
+            "Unknown mode %r. Choose from: all, random_modality, random_modality_train, %s",
+            mode, ", ".join(_MODES),
+        )
         sys.exit(1)
 
 
