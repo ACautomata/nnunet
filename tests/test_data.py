@@ -9,6 +9,8 @@ from nnunet.data import (
     _find_modality_file,
     _find_seg_file,
     create_nnunet_raw_dataset,
+    create_random_modality_dataset,
+    generate_grouped_splits,
     prepare_datalist,
     prepare_inference_folder,
 )
@@ -297,3 +299,196 @@ class TestCreateNnunetRawDataset:
         )
         second_images = sorted(os.listdir(os.path.join(raw, "Dataset1001_BraTS2023", "imagesTr")))
         assert second_images == ["case_000_0000.nii.gz", "case_001_0000.nii.gz"]
+
+
+class TestCreateRandomModalityDataset:
+    """Tests for the random-modality dataset builder."""
+
+    def test_creates_dataset_with_all_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        result, subject_map = create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        assert os.path.isdir(result)
+        assert os.path.basename(result) == "Dataset2001_BraTS2023_RandomModality"
+        assert len(subject_map) == 3
+
+    def test_case_count_equals_subjects_times_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr"))
+        labels = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "labelsTr"))
+        # 3 subjects × 4 modalities = 12 cases
+        assert len(images) == 12
+        assert len(labels) == 12
+
+    def test_subset_of_modalities(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw,
+            modalities=["t1c", "t2f"], dataset_id=2001,
+        )
+        images = os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr"))
+        # 2 subjects × 2 modalities = 4 cases
+        assert len(images) == 4
+
+    def test_dataset_json_channel_is_generic_mri(self, tmp_path):
+        """Channel name should be generic 'MRI', not a specific modality."""
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        with open(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "dataset.json")) as f:
+            ds = json.load(f)
+        assert ds["channel_names"] == {"0": "MRI"}
+        assert ds["labels"] == {"background": 0, "NCR_NET": 1, "ED": 2, "ET": 3}
+        assert ds["numTraining"] == 8  # 2 subjects × 4 modalities
+
+    def test_case_naming_is_sequential(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        # Should use 4-digit case IDs: case_0000 through case_0007
+        expected = [f"case_{i:04d}_0000.nii.gz" for i in range(8)]
+        assert images == expected
+
+    def test_labels_symlink_to_valid_targets(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        labels_dir = os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "labelsTr")
+        for lbl in os.listdir(labels_dir):
+            target = os.path.realpath(os.path.join(labels_dir, lbl))
+            assert os.path.isfile(target), f"Label symlink {lbl} -> {target} is broken"
+
+    def test_images_symlink_to_valid_targets(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        images_dir = os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")
+        for img in os.listdir(images_dir):
+            target = os.path.realpath(os.path.join(images_dir, img))
+            assert os.path.isfile(target), f"Image symlink {img} -> {target} is broken"
+
+    def test_no_labeled_subjects_raises(self, tmp_path):
+        """Subjects without seg.nii.gz should be skipped, and all-skipped raises."""
+        _make_brats_subjects(tmp_path, n_train=0, n_test=2)
+        raw = str(tmp_path / "nnunet_raw")
+        with pytest.raises(ValueError, match="No BraTS2023 subjects"):
+            create_random_modality_dataset(
+                data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+            )
+
+    def test_invalid_modality_raises(self, tmp_path):
+        _make_brats_subjects(tmp_path, n_train=1, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        with pytest.raises(ValueError, match="Unknown modality"):
+            create_random_modality_dataset(
+                data_root=str(tmp_path), nnunet_raw=raw,
+                modalities=["invalid"], dataset_id=2001,
+            )
+
+    def test_clears_stale_cases_from_previous_run(self, tmp_path):
+        """Re-running with fewer subjects drops old case symlinks."""
+        _make_brats_subjects(tmp_path, n_train=3, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        first = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        assert len(first) == 12
+
+        import shutil
+        shutil.rmtree(str(tmp_path / "BraTS-GLI-00002-000"))
+        create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        second = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
+        assert len(second) == 8  # 2 subjects × 4 modalities
+
+    def test_subject_map_has_correct_cases(self, tmp_path):
+        """subject_to_cases maps each subject to its case IDs."""
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        _, subject_map = create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        assert len(subject_map) == 2
+        for subject, cases in subject_map.items():
+            assert len(cases) == 4  # 4 modalities per subject
+            for case_id in cases:
+                assert case_id.startswith("case_")
+
+
+class TestGenerateGroupedSplits:
+    """Tests for grouped fold splits that prevent subject leakage."""
+
+    def test_all_cases_accounted_for(self):
+        subject_to_cases = {
+            "sub_0": ["case_0000", "case_0001", "case_0002", "case_0003"],
+            "sub_1": ["case_0004", "case_0005", "case_0006", "case_0007"],
+            "sub_2": ["case_0008", "case_0009", "case_0010", "case_0011"],
+            "sub_3": ["case_0012", "case_0013", "case_0014", "case_0015"],
+        }
+        splits = generate_grouped_splits(subject_to_cases, n_folds=2)
+        assert len(splits) == 2
+        all_cases = {"case_{:04d}".format(i) for i in range(16)}
+        for fold in splits:
+            assert len(fold["train"]) + len(fold["val"]) == 16
+        # Each fold's val should be disjoint from its train.
+        for fold in splits:
+            assert set(fold["train"]).isdisjoint(set(fold["val"]))
+
+    def test_subject_cases_stay_in_same_fold(self):
+        """No subject should have cases split across train and val."""
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i * 4 + j:04d}" for j in range(4)]
+            for i in range(10)
+        }
+        splits = generate_grouped_splits(subject_to_cases, n_folds=5)
+        for fold in splits:
+            train_set = set(fold["train"])
+            val_set = set(fold["val"])
+            for subject, cases in subject_to_cases.items():
+                cases_in_train = sum(1 for c in cases if c in train_set)
+                cases_in_val = sum(1 for c in cases if c in val_set)
+                # Each subject's cases must be entirely in train OR entirely in val.
+                assert cases_in_train == 0 or cases_in_val == 0, (
+                    f"Subject {subject} leaked across train/val: "
+                    f"{cases_in_train} in train, {cases_in_val} in val"
+                )
+
+    def test_reproducible_with_same_seed(self):
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i:04d}"] for i in range(20)
+        }
+        s1 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=42)
+        s2 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=42)
+        for f1, f2 in zip(s1, s2):
+            assert f1["train"] == f2["train"]
+            assert f1["val"] == f2["val"]
+
+    def test_different_seeds_produce_different_splits(self):
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i:04d}"] for i in range(20)
+        }
+        s1 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=1)
+        s2 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=2)
+        # At least one fold should differ.
+        any_different = any(
+            f1["val"] != f2["val"] for f1, f2 in zip(s1, s2)
+        )
+        assert any_different
