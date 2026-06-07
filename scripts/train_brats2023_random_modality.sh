@@ -8,7 +8,7 @@
 # that generalises across modalities.
 #
 # After training, the script creates separate inference folders for each
-# modality, runs prediction, and evaluates.
+# modality, runs prediction, and computes Dice scores against ground truth.
 set -euo pipefail
 
 usage() {
@@ -21,6 +21,7 @@ Required:
   --runtime-dir PATH        Directory for all nnUNet outputs.
 
 Options:
+  --test-dataroot PATH      Data root for per-modality testing (default: same as --dataroot).
   --modalities "LIST"       Space-separated modalities (default: "t1c t1n t2f t2w").
   --train-config NAME       nnUNet config (default: 3d_fullres).
   --fold N                  Fold to train (default: 0).
@@ -34,6 +35,7 @@ EOF
 
 DATAROOT=""
 RUNTIME_DIR=""
+TEST_DATAROOT=""
 MODALITIES=(t1c t1n t2f t2w)
 TRAIN_CONFIG="3d_fullres"
 FOLD="0"
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --runtime-dir)
             RUNTIME_DIR="${2:-}"
+            shift 2
+            ;;
+        --test-dataroot)
+            TEST_DATAROOT="${2:-}"
             shift 2
             ;;
         --modalities)
@@ -98,12 +104,25 @@ if [[ -z "$DATAROOT" || -z "$RUNTIME_DIR" ]]; then
     exit 2
 fi
 
+# Default test dataroot to training dataroot if not specified.
+if [[ -z "$TEST_DATAROOT" ]]; then
+    TEST_DATAROOT="$DATAROOT"
+fi
+
 if [[ ! -d "$DATAROOT" ]]; then
     echo "BraTS2023 data root not found: $DATAROOT" >&2
     exit 1
 fi
 
+if [[ ! -d "$TEST_DATAROOT" ]]; then
+    echo "Test data root not found: $TEST_DATAROOT" >&2
+    exit 1
+fi
+
 mkdir -p "$RUNTIME_DIR"
+
+# Zero-pad dataset ID to match Python's f"{dataset_id:04d}" format.
+DATASET_DIR="Dataset$(printf '%04d' "$DATASET_ID")_BraTS2023_RandomModality"
 
 # ── Phase 1: Train ────────────────────────────────────────────────────────────
 
@@ -134,9 +153,8 @@ else
     echo "=== Skipping training (--skip-train) ==="
 fi
 
-# ── Phase 2: Per-modality testing ─────────────────────────────────────────────
+# ── Phase 2: Per-modality prediction + Dice evaluation ────────────────────────
 
-DATASET_DIR="Dataset${DATASET_ID}_BraTS2023_RandomModality"
 MODEL_FOLDER="$RUNTIME_DIR/nnunet_results/$DATASET_DIR/${TRAINER_CLASS_NAME}__${TRAIN_CONFIG}__nnUNetPlans"
 
 if [[ ! -d "$MODEL_FOLDER" ]]; then
@@ -146,18 +164,20 @@ if [[ ! -d "$MODEL_FOLDER" ]]; then
 fi
 
 echo ""
-echo "=== Phase 2: Per-modality testing ==="
+echo "=== Phase 2: Per-modality prediction + Dice evaluation ==="
+echo "    test data: $TEST_DATAROOT"
 
 RESULTS_FILE="$RUNTIME_DIR/per_modality_results.txt"
-echo "Random Modality Model - Per-Modality Test Results" > "$RESULTS_FILE"
-echo "Dataset: $DATASET_DIR" >> "$RESULTS_FILE"
-echo "Model:   $MODEL_FOLDER" >> "$RESULTS_FILE"
-echo "Fold:    $FOLD" >> "$RESULTS_FILE"
+echo "Random Modality Model - Per-Modality Results" > "$RESULTS_FILE"
+echo "Dataset:  $DATASET_DIR" >> "$RESULTS_FILE"
+echo "Model:    $MODEL_FOLDER" >> "$RESULTS_FILE"
+echo "Fold:     $FOLD" >> "$RESULTS_FILE"
+echo "TestData: $TEST_DATAROOT" >> "$RESULTS_FILE"
 echo "---------------------------------------------------" >> "$RESULTS_FILE"
 
 for modality in "${MODALITIES[@]}"; do
     echo ""
-    echo "--- Testing modality: $modality ---"
+    echo "--- Modality: $modality ---"
 
     TEST_INPUT="$RUNTIME_DIR/test_input/$modality"
     TEST_OUTPUT="$RUNTIME_DIR/test_output/$modality"
@@ -166,7 +186,7 @@ for modality in "${MODALITIES[@]}"; do
     python -c "
 from nnunet.data import prepare_inference_folder
 prepare_inference_folder(
-    data_root='$DATAROOT',
+    data_root='$TEST_DATAROOT',
     output_folder='$TEST_INPUT',
     modality='$modality',
 )
@@ -190,13 +210,67 @@ print(f'Created inference folder: $TEST_INPUT')
 
     echo "  Prediction saved to: $TEST_OUTPUT"
 
-    # Count predictions as a sanity check.
-    if [[ -d "$TEST_OUTPUT" ]]; then
-        N_PRED=$(find "$TEST_OUTPUT" -name "*.nii.gz" | wc -l | tr -d ' ')
-        echo "  $modality: $N_PRED predictions" | tee -a "$RESULTS_FILE"
-    else
-        echo "  $modality: ERROR - no output folder" | tee -a "$RESULTS_FILE"
-    fi
+    # Compute per-label Dice scores against ground truth.
+    python -c "
+import os, numpy as np
+from pathlib import Path
+try:
+    import nibabel as nib
+except ImportError:
+    print('  nibabel not installed — skipping Dice evaluation')
+    exit(0)
+
+test_data = '$TEST_DATAROOT'
+pred_dir = '$TEST_OUTPUT'
+label_names = {1: 'NCR_NET', 2: 'ED', 3: 'ET'}
+
+pred_files = sorted(Path(pred_dir).glob('*.nii.gz'))
+if not pred_files:
+    print('  No prediction files found')
+    exit(0)
+
+dice_scores = {k: [] for k in label_names}
+n_evaluated = 0
+for pred_path in pred_files:
+    subject_name = pred_path.name.rsplit('_0000', 1)[0]
+    # Find ground truth seg file.
+    subj_dir = Path(test_data) / subject_name
+    seg_path = subj_dir / 'seg.nii.gz'
+    if not seg_path.exists():
+        # Try prefixed naming.
+        candidates = list(subj_dir.glob('*-seg.nii.gz'))
+        if not candidates:
+            continue
+        seg_path = candidates[0]
+
+    pred = np.asarray(nib.load(str(pred_path)).dataobj)
+    gt = np.asarray(nib.load(str(seg_path)).dataobj)
+
+    for lbl, name in label_names.items():
+        p = (pred == lbl).astype(np.float64)
+        g = (gt == lbl).astype(np.float64)
+        if p.sum() + g.sum() == 0:
+            continue  # label absent in both — skip
+        dice = 2.0 * (p * g).sum() / (p.sum() + g.sum()) if (p.sum() + g.sum()) > 0 else 0.0
+        dice_scores[lbl].append(dice)
+    n_evaluated += 1
+
+if n_evaluated == 0:
+    print('  No subjects with ground truth found for evaluation')
+else:
+    print(f'  Evaluated {n_evaluated} subjects')
+    for lbl, name in label_names.items():
+        scores = dice_scores[lbl]
+        if scores:
+            mean_dice = np.mean(scores)
+            print(f'  {name}: Dice = {mean_dice:.4f} (n={len(scores)})')
+        else:
+            print(f'  {name}: no cases with this label')
+    all_dice = [d for scores in dice_scores.values() for d in scores]
+    if all_dice:
+        print(f'  Mean Dice (all labels): {np.mean(all_dice):.4f}')
+" 2>&1 | tee -a "$RESULTS_FILE"
+
 done
 
 echo ""

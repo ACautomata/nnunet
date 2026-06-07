@@ -10,6 +10,7 @@ from nnunet.data import (
     _find_seg_file,
     create_nnunet_raw_dataset,
     create_random_modality_dataset,
+    generate_grouped_splits,
     prepare_datalist,
     prepare_inference_folder,
 )
@@ -306,11 +307,12 @@ class TestCreateRandomModalityDataset:
     def test_creates_dataset_with_all_modalities(self, tmp_path):
         _make_brats_subjects(tmp_path, n_train=3, n_test=0)
         raw = str(tmp_path / "nnunet_raw")
-        result = create_random_modality_dataset(
+        result, subject_map = create_random_modality_dataset(
             data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
         )
         assert os.path.isdir(result)
         assert os.path.basename(result) == "Dataset2001_BraTS2023_RandomModality"
+        assert len(subject_map) == 3
 
     def test_case_count_equals_subjects_times_modalities(self, tmp_path):
         _make_brats_subjects(tmp_path, n_train=3, n_test=0)
@@ -416,3 +418,77 @@ class TestCreateRandomModalityDataset:
         )
         second = sorted(os.listdir(os.path.join(raw, "Dataset2001_BraTS2023_RandomModality", "imagesTr")))
         assert len(second) == 8  # 2 subjects × 4 modalities
+
+    def test_subject_map_has_correct_cases(self, tmp_path):
+        """subject_to_cases maps each subject to its case IDs."""
+        _make_brats_subjects(tmp_path, n_train=2, n_test=0)
+        raw = str(tmp_path / "nnunet_raw")
+        _, subject_map = create_random_modality_dataset(
+            data_root=str(tmp_path), nnunet_raw=raw, dataset_id=2001,
+        )
+        assert len(subject_map) == 2
+        for subject, cases in subject_map.items():
+            assert len(cases) == 4  # 4 modalities per subject
+            for case_id in cases:
+                assert case_id.startswith("case_")
+
+
+class TestGenerateGroupedSplits:
+    """Tests for grouped fold splits that prevent subject leakage."""
+
+    def test_all_cases_accounted_for(self):
+        subject_to_cases = {
+            "sub_0": ["case_0000", "case_0001", "case_0002", "case_0003"],
+            "sub_1": ["case_0004", "case_0005", "case_0006", "case_0007"],
+            "sub_2": ["case_0008", "case_0009", "case_0010", "case_0011"],
+            "sub_3": ["case_0012", "case_0013", "case_0014", "case_0015"],
+        }
+        splits = generate_grouped_splits(subject_to_cases, n_folds=2)
+        assert len(splits) == 2
+        all_cases = {"case_{:04d}".format(i) for i in range(16)}
+        for fold in splits:
+            assert len(fold["train"]) + len(fold["val"]) == 16
+        # Each fold's val should be disjoint from its train.
+        for fold in splits:
+            assert set(fold["train"]).isdisjoint(set(fold["val"]))
+
+    def test_subject_cases_stay_in_same_fold(self):
+        """No subject should have cases split across train and val."""
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i * 4 + j:04d}" for j in range(4)]
+            for i in range(10)
+        }
+        splits = generate_grouped_splits(subject_to_cases, n_folds=5)
+        for fold in splits:
+            train_set = set(fold["train"])
+            val_set = set(fold["val"])
+            for subject, cases in subject_to_cases.items():
+                cases_in_train = sum(1 for c in cases if c in train_set)
+                cases_in_val = sum(1 for c in cases if c in val_set)
+                # Each subject's cases must be entirely in train OR entirely in val.
+                assert cases_in_train == 0 or cases_in_val == 0, (
+                    f"Subject {subject} leaked across train/val: "
+                    f"{cases_in_train} in train, {cases_in_val} in val"
+                )
+
+    def test_reproducible_with_same_seed(self):
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i:04d}"] for i in range(20)
+        }
+        s1 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=42)
+        s2 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=42)
+        for f1, f2 in zip(s1, s2):
+            assert f1["train"] == f2["train"]
+            assert f1["val"] == f2["val"]
+
+    def test_different_seeds_produce_different_splits(self):
+        subject_to_cases = {
+            f"sub_{i}": [f"case_{i:04d}"] for i in range(20)
+        }
+        s1 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=1)
+        s2 = generate_grouped_splits(subject_to_cases, n_folds=5, seed=2)
+        # At least one fold should differ.
+        any_different = any(
+            f1["val"] != f2["val"] for f1, f2 in zip(s1, s2)
+        )
+        assert any_different

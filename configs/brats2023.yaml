@@ -6,6 +6,7 @@ datalist: ???
 dataroot: ???
 modality: "MRI"  # channel label for nnUNet metadata
 modality_file: "t2f"  # BraTS filename stem: t1c, t1n, t2f, t2w
+modalities: "t1c t1n t2f t2w"  # space-separated; used by random_modality pipeline
 
 # --- nnUNet working directories ---
 nnunet_raw: ???

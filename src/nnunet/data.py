@@ -30,6 +30,7 @@ __all__ = [
     "prepare_inference_folder",
     "create_nnunet_raw_dataset",
     "create_random_modality_dataset",
+    "generate_grouped_splits",
 ]
 
 # BraTS2023 ground-truth labels (foreground only; background is implicit 0).
@@ -371,8 +372,12 @@ def create_random_modality_dataset(
 
     Returns
     -------
-    str
-        Path to the created dataset directory.
+    tuple[str, dict[str, list[str]]]
+        ``(dataset_dir, subject_to_cases)`` where *subject_to_cases* maps
+        each subject directory name to its list of nnUNet case IDs (e.g.
+        ``{"BraTS-GLI-00000-000": ["case_0000", "case_0001", ...]}``).
+        Pass *subject_to_cases* to :func:`generate_grouped_splits` to
+        prevent subject leakage across folds.
     """
     if modalities is None:
         modalities = list(MODALITY_NAMES.keys())
@@ -395,6 +400,7 @@ def create_random_modality_dataset(
         for stale in stale_dir.glob("case_*"):
             stale.unlink()
 
+    subject_to_cases: dict[str, list[str]] = {}
     count = 0
     for subj_dir in sorted(data_root.iterdir()):
         if not subj_dir.is_dir():
@@ -404,6 +410,7 @@ def create_random_modality_dataset(
             continue
 
         lbl_src = (subj_dir / Path(lbl_rel).name).resolve()
+        cases_for_subject: list[str] = []
 
         for mod in modalities:
             modality_file = MODALITY_NAMES[mod]
@@ -424,7 +431,11 @@ def create_random_modality_dataset(
 
             img_link.symlink_to(img_src)
             lbl_link.symlink_to(lbl_src)
+            cases_for_subject.append(case_id)
             count += 1
+
+        if cases_for_subject:
+            subject_to_cases[subj_dir.name] = cases_for_subject
 
     if count == 0:
         raise ValueError(
@@ -440,4 +451,56 @@ def create_random_modality_dataset(
     }
     (dataset_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
 
-    return str(dataset_dir)
+    return str(dataset_dir), subject_to_cases
+
+
+def generate_grouped_splits(
+    subject_to_cases: dict[str, list[str]],
+    n_folds: int = 5,
+    seed: int = 12345,
+) -> list[dict[str, list[str]]]:
+    """Generate fold splits that keep all cases from the same subject together.
+
+    Without grouped splits, nnUNet may assign different modalities of the
+    same subject to different folds, causing optimistic validation metrics
+    (subject-level leakage).  This function splits at the subject level
+    first, then expands each subject into its constituent case IDs.
+
+    Parameters
+    ----------
+    subject_to_cases : dict[str, list[str]]
+        Mapping from subject name to list of nnUNet case IDs, as returned
+        by :func:`create_random_modality_dataset`.
+    n_folds : int
+        Number of cross-validation folds.
+    seed : int
+        Random seed for reproducible splits.
+
+    Returns
+    -------
+    list[dict[str, list[str]]]
+        A list of length *n_folds*, where each entry has keys ``"train"``
+        and ``"val"`` mapping to lists of case ID strings.  Compatible with
+        nnUNet's ``splits_final.json`` format.
+    """
+    subjects = sorted(subject_to_cases.keys())
+    rng = random.Random(seed)
+    rng.shuffle(subjects)
+
+    folds: list[dict[str, list[str]]] = []
+    for fold_idx in range(n_folds):
+        val_subjects = [
+            s for i, s in enumerate(subjects) if i % n_folds == fold_idx
+        ]
+        train_subjects = [s for s in subjects if s not in set(val_subjects)]
+
+        val_cases = [
+            cid for s in val_subjects for cid in subject_to_cases[s]
+        ]
+        train_cases = [
+            cid for s in train_subjects for cid in subject_to_cases[s]
+        ]
+
+        folds.append({"train": train_cases, "val": val_cases})
+
+    return folds
